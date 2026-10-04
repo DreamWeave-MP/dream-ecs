@@ -1,0 +1,31 @@
+manifest_version = 1
+
+[package]
+id = "org.dreamweave.ecs"
+version = "0.2.0"
+jess_api = "1"
+include = ["src", "tests", "bench", "README.md", "ECS-BENCHMARKS.md"]
+tests = ["tests/run.luau"]
+
+[dependencies]
+"org.dreamweave.jessql" = "0.1.5"
+
+[modules]
+"@dream/ecs" = "src/init.luau"
+"@dream/ecs/world" = "src/world.luau"
+"@dream/ecs/query" = "src/query.luau"
+"@dream/ecs/relation" = "src/relation.luau"
+"@dream/ecs/relation-query" = "src/relation_query.luau"
+"@dream/ecs/event" = "src/event.luau"
+"@dream/ecs/command" = "src/command.luau"
+"@dream/ecs/tests" = "tests/run.luau"
+
+[[layer]]
+id = "ecs.core"
+requires = ["jessql.core"]
+exports = ["@dream/ecs", "@dream/ecs/world", "@dream/ecs/query", "@dream/ecs/relation", "@dream/ecs/relation-query", "@dream/ecs/event", "@dream/ecs/command"]
+
+[[layer]]
+id = "ecs.tests"
+requires = ["ecs.core"]
+exports = ["@dream/ecs/tests"]
