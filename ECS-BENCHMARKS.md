@@ -1,6 +1,6 @@
-# Dream ECS 0.2.0 benchmark report
+# Dream ECS 0.2.1 benchmark report
 
-Environment: supplied `jess 0.1.0`, `jessql 0.1.5`, release/native Luau execution. Numbers are
+Environment: supplied `jess 0.1.0`, `jessql 0.1.6`, release/native Luau execution. Numbers are
 engineering baselines from the supplied machine, not portable hardware claims. Unless noted, values
 below are representative medians from repeated runs in `bench/final-0.2.0.txt`.
 
@@ -106,3 +106,19 @@ points are:
 
 The explicit non-goal is arbitrary SQL inside frame loops. JessQL is the parser/planner and the cold
 relational observability surface; hot ECS plans lower into integer indexes and raw buffers.
+
+
+## 0.2.1 external-drain pressure
+
+MJ12 exposed a cost that the internal compiled-query benchmarks did not: an external subsystem
+(Physik) may already have a dense SoA drain but only an entity token for locating the ECS row. Six
+independent `World:set()` calls per body repeated token decode and locator lookup six times.
+
+0.2.1 adds `World:locate(entity) -> chunk, row`, an allocation-free public escape hatch whose row is
+valid only until the next structural mutation boundary. MJ12 resolves each body once and then writes
+its Local/Velocity f32 columns directly. On the supplied sandbox this reduced the integrated 1000-body
+step from roughly 2.83 ms median to roughly 1.92 ms before any Physik changes, and 5000 bodies from
+roughly 13.15 ms to roughly 10.04 ms.
+
+The API is deliberately generic: physics, animation, networking, importers, and other packed producers
+can use it without teaching Dream ECS anything about those domains.

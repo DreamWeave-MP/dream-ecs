@@ -356,6 +356,17 @@ function World:has(token, component)
   return self._archetypes[archetypeId].has[component.id] == true
 end
 
+-- Resolve an entity token to its current packed storage row. The returned chunk/row is
+-- intentionally ephemeral: structural changes may move the entity, so callers must not cache the
+-- row across spawn/destroy/add/remove/command-buffer synchronization boundaries. This is the hot
+-- escape hatch for bulk producers that already know the field layout and want one token lookup
+-- followed by direct SoA buffer writes.
+function World:locate(token)
+  local _, archetypeId, chunkIndex, row = self:_location(token)
+  if not archetypeId then return nil end
+  return self._archetypes[archetypeId].chunks[chunkIndex], row
+end
+
 function World:get(token, field)
   local _, archetypeId, chunkIndex, row = self:_location(token)
   if not archetypeId then return nil end

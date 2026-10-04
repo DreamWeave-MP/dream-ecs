@@ -76,6 +76,26 @@ for entity, chunk, row in attackers:rows({ player }) do
 end
 ```
 
+## Direct entity row access
+
+High-volume external producers can resolve an entity once and then update its packed columns
+directly:
+
+```luau
+local chunk, row = world:locate(entity)
+if chunk then
+  buffer.writef32(chunk:buffer(position.x), row * 4, x)
+  buffer.writef32(chunk:buffer(position.y), row * 4, y)
+  buffer.writef32(chunk:buffer(position.z), row * 4, z)
+end
+```
+
+`locate()` allocates nothing and validates the generation once. The returned row is ephemeral: any
+structural change that can migrate or compact entities invalidates cached rows. Resolve again after
+spawn/destroy/add/remove or command-buffer synchronization. This API exists for drains from physics,
+network replication, animation, and similar SoA producers; ordinary gameplay code should prefer
+`get`, `set`, queries, and systems.
+
 ## Systems and scheduling
 
 ```luau
