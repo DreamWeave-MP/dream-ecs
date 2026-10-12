@@ -54,8 +54,7 @@ end
 local rawSeconds = seconds(function()
   for _ = 1, frames do
     for _, chunk in rawChunks do
-      local px, py, pz = chunk.px, chunk.py, chunk.pz
-      local vx, vy, vz = chunk.vx, chunk.vy, chunk.vz
+      local {px, py, pz, vx, vy, vz} = chunk
       for row = 0, chunk.count - 1 do
         local offset = row * 4
         buffer.writef32(px, offset, buffer.readf32(px, offset) + buffer.readf32(vx, offset) * dt)

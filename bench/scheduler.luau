@@ -24,8 +24,7 @@ local registrationSeconds = os.clock() - registrationStart
 local scheduleStart = os.clock()
 local waves = world:schedule()
 local scheduleSeconds = os.clock() - scheduleStart
-local scheduledSystems = 0
-for _, wave in waves do scheduledSystems += #wave end
+local scheduledSystems = sum[for wave in waves => #wave]
 
 print(`systems={systemCount} waves={#waves} scheduled={scheduledSystems}`)
 print(`registration_s={registrationSeconds} schedule_s={scheduleSeconds} schedule_us_system={scheduleSeconds/systemCount*1e6}`)

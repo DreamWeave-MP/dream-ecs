@@ -26,7 +26,17 @@ for chunk in collision:chunks() do
 end
 local iterateSeconds = os.clock() - before
 
+-- The same total as one typed-slice reduction a chunk, which l3i runs in the data plane.
+local reduced = 0
+before = os.clock()
+for chunk in collision:chunks() do
+  reduced += sum[for impulse in chunk:buffer(collision.impulse)[1:chunk.count, 'f32'] => impulse]
+end
+local reduceSeconds = os.clock() - before
+if reduced ~= checksum then error(`events bench: the reduction summed {reduced}, the row loop {checksum}`) end
+
 local bytes = collision:bytes()
 print(`events={eventCount} emit_s={emitSeconds} emit_s_rate={eventCount/emitSeconds}`)
 print(`iterate_s={iterateSeconds} rows_s={eventCount/iterateSeconds} checksum={checksum}`)
+print(`reduce_s={reduceSeconds} reduce_rows_s={eventCount/reduceSeconds} reduced={reduced}`)
 print(`packed_bytes={bytes} bytes_event={bytes/eventCount}`)
