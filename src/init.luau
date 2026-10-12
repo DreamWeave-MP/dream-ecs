@@ -1,3 +1,4 @@
+--!strict
 --!native
 
 local World = require('@dream/ecs/world')
