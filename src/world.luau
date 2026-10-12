@@ -486,11 +486,7 @@ local function removedTransition(world, source, component)
   local target = source.removeTransitions[component.id]
   if target then return target end
 
-  local ids = {}
-  for _, componentId in source.componentIds do
-    if componentId ~= component.id then ids[#ids + 1] = componentId end
-  end
-  target = world:_archetype(ids)
+  target = world:_archetype([for componentId in source.componentIds if componentId ~= component.id => componentId])
   source.removeTransitions[component.id] = target
   target.addTransitions[component.id] = source
   return target
@@ -1044,16 +1040,17 @@ local function makeEntityProvider(world)
     local required, excluded, handled = {}, {}, true
     local entityToken = nil
     for _, constraint in request.constraints or {} do
-      if constraint.column == 'entity' and constraint.op == '=' and type(constraint.value) == 'number' then
-        entityToken = constraint.value
+      local {column, op: operator, value} = constraint
+      if column == 'entity' and operator == '=' and type(value) == 'number' then
+        entityToken = value
       else
-        local component = world._componentByName[constraint.column]
-        if constraint.op ~= '=' or not component or type(constraint.value) ~= 'boolean' then
+        local component = world._componentByName[column]
+        if operator ~= '=' or not component or type(value) ~= 'boolean' then
           handled = false
           break
         end
 
-        if constraint.value then required[component.id] = true else excluded[component.id] = true end
+        if value then required[component.id] = true else excluded[component.id] = true end
       end
     end
 
@@ -1191,8 +1188,9 @@ local function makeComponentProvider(world, component)
     local entityToken = nil
     local handled = true
     for _, constraint in request.constraints or {} do
-      if constraint.column == 'entity' and constraint.op == '=' and type(constraint.value) == 'number' then
-        entityToken = constraint.value
+      local {column, op: operator, value} = constraint
+      if column == 'entity' and operator == '=' and type(value) == 'number' then
+        entityToken = value
       else
         handled = false
       end
@@ -1212,10 +1210,7 @@ local function makeComponentProvider(world, component)
       }
     end
 
-    local archetypes = {}
-    for _, archetype in world._archetypes do
-      if archetype.has[component.id] then archetypes[#archetypes + 1] = archetype end
-    end
+    local archetypes = [for archetype in world._archetypes if archetype.has[component.id] => archetype]
     local archetypeIndex, chunkIndex, row = 1, 1, -1
     local reusable = {}
     local volatileRows = request.allowVolatileRows == true
@@ -1254,8 +1249,9 @@ local function makeRelationProvider(world)
   local function selectedStores(request)
     local relationName = nil
     for _, constraint in request.constraints or {} do
-      if constraint.column == 'relation' and constraint.op == '=' and type(constraint.value) == 'string' then
-        relationName = constraint.value
+      local {column, op: operator, value} = constraint
+      if column == 'relation' and operator == '=' and type(value) == 'string' then
+        relationName = value
         break
       end
     end
@@ -1264,9 +1260,7 @@ local function makeRelationProvider(world)
       local definition = world._relationByName[relationName]
       return if definition then { world._relationStores[definition.id] } else {}
     end
-    local stores = {}
-    for _, store in world._relationStores do stores[#stores + 1] = store end
-    return stores
+    return [for store in world._relationStores => store]
   end
 
   local provider = {
@@ -1312,14 +1306,15 @@ local function makeRelationProvider(world)
     local handled = true
     local sourceToken, targetToken = nil, nil
     for _, constraint in request.constraints or {} do
-      if constraint.op ~= '=' then
+      local {column, op: operator, value} = constraint
+      if operator ~= '=' then
         handled = false
-      elseif constraint.column == 'relation' and type(constraint.value) == 'string' then
+      elseif column == 'relation' and type(value) == 'string' then
         -- selectedStores already consumed it.
-      elseif constraint.column == 'source' and type(constraint.value) == 'number' then
-        sourceToken = constraint.value
-      elseif constraint.column == 'target' and type(constraint.value) == 'number' then
-        targetToken = constraint.value
+      elseif column == 'source' and type(value) == 'number' then
+        sourceToken = value
+      elseif column == 'target' and type(value) == 'number' then
+        targetToken = value
       else
         handled = false
       end
@@ -1399,48 +1394,34 @@ function World:sql()
   for _, component in self._components do db:register(component.name, makeComponentProvider(self, component)) end
   for _, store in self._events do db:register(store.name, store:provider(self)) end
 
-  local archetypeRows = {}
-  for _, archetype in self._archetypes do
-    archetypeRows[#archetypeRows + 1] = {
-      id = archetype.id,
-      entities = archetype.count,
-      chunks = #archetype.chunks,
-      signature = archetype.key,
-    }
-  end
+  local archetypeRows = [for archetype in self._archetypes => {
+    id = archetype.id,
+    entities = archetype.count,
+    chunks = #archetype.chunks,
+    signature = archetype.key,
+  }]
   db:table('archetypes', archetypeRows, { 'id', 'entities', 'chunks', 'signature' })
 
-  local componentRows, fieldRows = {}, {}
-  for _, component in self._components do
-    componentRows[#componentRows + 1] = {
-      id = component.id, name = component.name, tag = component.tag, fields = #component.fields,
-    }
-
-    for _, field in component.fields do
-      fieldRows[#fieldRows + 1] = {
-        id = field.id, component = component.name, name = field.name, kind = field.kind, width = field.width,
-      }
-    end
-  end
+  local componentRows = [for component in self._components => {
+    id = component.id, name = component.name, tag = component.tag, fields = #component.fields,
+  }]
   db:table('components', componentRows, { 'id', 'name', 'tag', 'fields' })
+
+  local fieldRows = [for component in self._components for field in component.fields => {
+    id = field.id, component = component.name, name = field.name, kind = field.kind, width = field.width,
+  }]
   db:table('fields', fieldRows, { 'id', 'component', 'name', 'kind', 'width' })
 
-  local eventRows = {}
-  for _, event in self._events do
-    eventRows[#eventRows + 1] = {
-      id = event.id,
-      name = event.name,
-      rows = event.count,
-      fields = #event.fields,
-      bytes = event:bytes(),
-    }
-  end
+  local eventRows = [for event in self._events => {
+    id = event.id,
+    name = event.name,
+    rows = event.count,
+    fields = #event.fields,
+    bytes = event:bytes(),
+  }]
   db:table('events', eventRows, { 'id', 'name', 'rows', 'fields', 'bytes' })
 
-  local resourceRows = {}
-  for _, resource in self._resourceDefs do
-    resourceRows[#resourceRows + 1] = { id = resource.id, name = resource.name }
-  end
+  local resourceRows = [for resource in self._resourceDefs => { id = resource.id, name = resource.name }]
   db:table('resources', resourceRows, { 'id', 'name' })
 
   local systemRows = {}
@@ -1478,10 +1459,8 @@ function World:stats()
     end
   end
 
-  local relationBytes = 0
-  for _, store in self._relationStores do relationBytes += store:bytes() end
-  local eventBytes = 0
-  for _, store in self._events do eventBytes += store:bytes() end
+  local relationBytes = sum[for store in self._relationStores => store:bytes()]
+  local eventBytes = sum[for store in self._events => store:bytes()]
 
   return {
     entities = self.count,
