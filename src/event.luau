@@ -33,8 +33,8 @@ local function decodeToken(token)
 end
 
 local function newChunk(store)
-  local columns = {}
-  for _, field in store.fields do columns[field.id] = buffer.create(store.blockCapacity * field.width) end
+  -- A field's id is its place in the list, so the columns are the list mapped.
+  local columns = [for field in store.fields => buffer.create(store.blockCapacity * field.width)]
   return setmetatable({ count = 0, capacity = store.blockCapacity, columns = columns }, EventChunk)
 end
 
@@ -110,14 +110,12 @@ function EventStore:chunks()
 end
 
 function EventStore:bytes()
-  local rowWidth = 0
-  for _, field in self.fields do rowWidth += field.width end
+  local rowWidth = sum[for field in self.fields => field.width]
   return #self._chunks * self.blockCapacity * rowWidth
 end
 
 function EventStore:provider(world)
-  local columns = {}
-  for _, field in self.fields do columns[#columns + 1] = field.name end
+  local columns = [for field in self.fields => field.name]
 
   return {
     columns = columns,
