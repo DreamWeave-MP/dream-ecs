@@ -76,6 +76,23 @@ local function writeNumber(kind: string, column: buffer, offset: number, value: 
   end
 end
 
+-- One field of one row copied from column to column. Unsigned reads and writes carry every bit
+-- pattern of their width and compile in place, where buffer.copy is a call for a few bytes.
+local function copyCell(target: buffer, targetOffset: number, source: buffer, sourceOffset: number, width: number)
+  if width == 4 then
+    buffer.writeu32(target, targetOffset, buffer.readu32(source, sourceOffset))
+  elseif width == 8 then
+    buffer.writeu32(target, targetOffset, buffer.readu32(source, sourceOffset))
+    buffer.writeu32(target, targetOffset + 4, buffer.readu32(source, sourceOffset + 4))
+  elseif width == 1 then
+    buffer.writeu8(target, targetOffset, buffer.readu8(source, sourceOffset))
+  elseif width == 2 then
+    buffer.writeu16(target, targetOffset, buffer.readu16(source, sourceOffset))
+  else
+    buffer.copy(target, targetOffset, source, sourceOffset, width)
+  end
+end
+
 local Chunk = {}
 Chunk.__index = Chunk
 
@@ -455,7 +472,7 @@ local function copyRow(world, sourceChunk, sourceRow, targetChunk, targetRow, ta
       writeInitial(world, targetChunk, targetRow, component, addedValue, targetRow >= targetChunk.highWater)
     elseif sourceChunk.archetype.has[componentId] then
       for _, field in component.fields do
-        buffer.copy(targetChunk.columns[field.id], targetRow * field.width, sourceChunk.columns[field.id], sourceRow * field.width, field.width)
+        copyCell(targetChunk.columns[field.id], targetRow * field.width, sourceChunk.columns[field.id], sourceRow * field.width, field.width)
       end
     end
   end
@@ -501,7 +518,8 @@ function World:_removeRow(archetype, chunkIndex, row)
     for _, componentId in archetype.componentIds do
       local component = self._components[componentId]
       for _, field in component.fields do
-        buffer.copy(chunk.columns[field.id], row * field.width, chunk.columns[field.id], last * field.width, field.width)
+        local column = chunk.columns[field.id]
+        copyCell(column, row * field.width, column, last * field.width, field.width)
       end
     end
     local movedPage, movedOffset = pageFor(self, movedIndex, false)
