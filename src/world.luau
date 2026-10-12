@@ -48,6 +48,34 @@ local FieldTypes = {
   entity = { width = 8 },
 }
 
+-- A numeric field read as its kind. Naming the buffer function, where a field's own `read` would
+-- be a call through the field, lets native code read the column in place.
+local function readNumber(kind: string, column: buffer, offset: number): number
+  if kind == 'f32' then return buffer.readf32(column, offset) end
+  if kind == 'u32' then return buffer.readu32(column, offset) end
+  if kind == 'u8' or kind == 'bool' then return buffer.readu8(column, offset) end
+  if kind == 'u16' then return buffer.readu16(column, offset) end
+  if kind == 'i32' then return buffer.readi32(column, offset) end
+  return buffer.readf64(column, offset)
+end
+
+-- The same for a write.
+local function writeNumber(kind: string, column: buffer, offset: number, value: number)
+  if kind == 'f32' then
+    buffer.writef32(column, offset, value)
+  elseif kind == 'u32' then
+    buffer.writeu32(column, offset, value)
+  elseif kind == 'u8' or kind == 'bool' then
+    buffer.writeu8(column, offset, value)
+  elseif kind == 'u16' then
+    buffer.writeu16(column, offset, value)
+  elseif kind == 'i32' then
+    buffer.writei32(column, offset, value)
+  else
+    buffer.writef64(column, offset, value)
+  end
+end
+
 local Chunk = {}
 Chunk.__index = Chunk
 
@@ -240,7 +268,7 @@ local function writeInitial(world, chunk, row, component, values, fresh)
       buffer.writeu32(chunk.columns[field.id], offset, entityIndex)
       buffer.writeu32(chunk.columns[field.id], offset + 4, generation)
     else
-      field.write(chunk.columns[field.id], offset, value)
+      writeNumber(field.kind, chunk.columns[field.id], offset, value)
     end
   end
 end
@@ -534,7 +562,7 @@ function World:get(token, field)
     local generation = buffer.readu32(column, offset + 4)
     return generation * TokenScale + entityIndex
   end
-  local value = field.read(column, offset)
+  local value = readNumber(field.kind, column, offset)
   if field.kind == 'bool' then return value ~= 0 end
   return value
 end
@@ -553,7 +581,7 @@ function World:set(token, field, value)
     buffer.writeu32(column, offset, entityIndex)
     buffer.writeu32(column, offset + 4, generation)
   else
-    field.write(column, offset, value)
+    writeNumber(field.kind, column, offset, value)
   end
   return true
 end
@@ -1126,7 +1154,7 @@ local function readFieldValue(world, chunk, row, field)
     local generation = buffer.readu32(column, offset + 4)
     return generation * TokenScale + index
   end
-  local value = field.read(column, offset)
+  local value = readNumber(field.kind, column, offset)
   return if field.kind == 'bool' then value ~= 0 else value
 end
 
