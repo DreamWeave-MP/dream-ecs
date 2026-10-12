@@ -594,9 +594,9 @@ function World:_migrateArchetype(sourceArchetype, targetArchetype, added, addedV
       for _, componentId in targetArchetype.componentIds do
         local component = self._components[componentId]
         if componentId == added then
-          for rowOffset = 0, take - 1 do
-            writeInitial(self, targetChunk, targetRow + rowOffset, component, addedValue, targetRow + rowOffset >= targetChunk.highWater)
-          end
+          local used = math.clamp(targetChunk.highWater - targetRow, 0, take)
+          fillInitial(targetChunk, targetRow, used, component, addedValue, false)
+          fillInitial(targetChunk, targetRow + used, take - used, component, addedValue, true)
         elseif sourceArchetype.has[componentId] then
           for _, field in component.fields do
             buffer.copy(
@@ -610,11 +610,9 @@ function World:_migrateArchetype(sourceArchetype, targetArchetype, added, addedV
         end
       end
 
-      for rowOffset = 0, take - 1 do
-        local index = buffer.readu32(sourceChunk.entityIds, (sourceRow + rowOffset) * 4)
-        self:_setLocation(index, self:_generation(index), targetArchetype.id, targetChunkIndex, targetRow + rowOffset)
-      end
+      if targetArchetype.id > 65535 or targetChunkIndex > 65535 then error('ecs: packed entity locator overflow') end
 
+      locateRun(self._entityPages, targetChunk.entityIds, targetRow, take, targetArchetype.id, targetChunkIndex)
       targetChunk.count += take
       if targetChunk.count > targetChunk.highWater then targetChunk.highWater = targetChunk.count end
       targetArchetype.count += take
