@@ -1,12 +1,32 @@
 --!strict
 --!native
 
+local data = require('@dream/data')
 local sql = require('@jessql')
 local Query = require('@dream/ecs/query')
 local RelationQuery = require('@dream/ecs/relation-query')
 local RelationStore = require('@dream/ecs/relation')
 local EventStore = require('@dream/ecs/event')
 local CommandBuffer = require('@dream/ecs/command')
+
+type Field = {
+  id: number,
+  name: string,
+  kind: string,
+  width: number,
+  write: (column: buffer, offset: number, value: unknown) -> (),
+  default: unknown,
+}
+
+type Component = { id: number, fields: { Field }, tag: boolean, needsFreshInit: boolean }
+
+type Chunk = {
+  count: number,
+  capacity: number,
+  entityIds: buffer,
+  columns: { [number]: buffer },
+  highWater: number,
+}
 
 local World = {}
 World.__index = World
@@ -16,14 +36,15 @@ local EntityStride = 8
 local DefaultChunkCapacity = 8192
 local TokenScale = 4294967296
 
+-- `element` is the field as @dream/data spells it, for the kinds one fill can write.
 local FieldTypes = {
-  u8 = { width = 1, read = buffer.readu8, write = buffer.writeu8 },
-  u16 = { width = 2, read = buffer.readu16, write = buffer.writeu16 },
-  u32 = { width = 4, read = buffer.readu32, write = buffer.writeu32 },
-  i32 = { width = 4, read = buffer.readi32, write = buffer.writei32 },
-  f32 = { width = 4, read = buffer.readf32, write = buffer.writef32 },
-  f64 = { width = 8, read = buffer.readf64, write = buffer.writef64 },
-  bool = { width = 1, read = buffer.readu8, write = buffer.writeu8 },
+  u8 = { width = 1, read = buffer.readu8, write = buffer.writeu8, element = 'u8' },
+  u16 = { width = 2, read = buffer.readu16, write = buffer.writeu16, element = 'u16' },
+  u32 = { width = 4, read = buffer.readu32, write = buffer.writeu32, element = 'u32' },
+  i32 = { width = 4, read = buffer.readi32, write = buffer.writei32, element = 'i32' },
+  f32 = { width = 4, read = buffer.readf32, write = buffer.writef32, element = 'f32' },
+  f64 = { width = 8, read = buffer.readf64, write = buffer.writef64, element = 'f64' },
+  bool = { width = 1, read = buffer.readu8, write = buffer.writeu8, element = 'u8' },
   entity = { width = 8 },
 }
 
@@ -188,18 +209,27 @@ function World:_allocateEntity()
   return index, generation
 end
 
+-- What a new row's field is written with: the value given, else the field's default, else zero,
+-- a bool as its byte. A fresh row is zero already, so nil says there is nothing to write.
+local function initialValue(field: Field, values: { [string]: unknown }, fresh: boolean): unknown
+  local value = values[field.name]
+  if value == nil then
+    value = field.default or 0
+    if fresh and value == 0 then return nil end
+  end
+
+  if field.kind == 'bool' then return if value then 1 else 0 end
+  return value
+end
+
 local function writeInitial(world, chunk, row, component, values, fresh)
   if component.tag then return end
   values = values or {}
   for _, field in component.fields do
-    local value = values[field.name]
-    if value == nil then
-      value = field.default or 0
-      if fresh and value == 0 then continue end
-    end
-    local offset = row * field.width
-    if field.kind == 'bool' then value = if value then 1 else 0 end
+    local value = initialValue(field, values, fresh)
+    if value == nil then continue end
 
+    local offset = row * field.width
     if field.kind == 'entity' then
       local entityIndex, generation
       if value == 0 then
@@ -215,29 +245,151 @@ local function writeInitial(world, chunk, row, component, values, fresh)
   end
 end
 
-function World:spawnBatch(count, components)
-  local ids = {}
-  for _, component in components do table.insert(ids, component.id) end
-  table.sort(ids)
-  local archetype = self:_archetype(ids)
+-- writeInitial for one component over the rows [firstRow, firstRow + rowCount) of a chunk: every
+-- row gets the same values, so each field is one fill of its column.
+local function fillInitial(
+  chunk: Chunk,
+  firstRow: number,
+  rowCount: number,
+  component: Component,
+  given: { [string]: unknown }?,
+  fresh: boolean
+)
+  if component.tag or rowCount == 0 then return end
 
-  for _ = 1, count do
-    local chunk, chunkIndex = self:_chunkForSpawn(archetype)
-    local row = chunk.count
-    local index, generation = self:_allocateEntity()
-    buffer.writeu32(chunk.entityIds, row * 4, index)
+  local values = given or {}
+  for _, field in component.fields do
+    local value = initialValue(field, values, fresh)
+    if value == nil then continue end
 
-    local fresh = row >= chunk.highWater
-    for _, componentId in ids do
-      local component = self._components[componentId]
-      if not fresh or component.needsFreshInit then writeInitial(self, chunk, row, component, nil, fresh) end
+    local column = chunk.columns[field.id]
+    local offset = firstRow * field.width
+    if field.kind == 'entity' then
+      local entityIndex, generation = 0, 0
+      if value ~= 0 then
+        entityIndex, generation = decodeToken(value)
+      end
+
+      data.fill(column, 'u32@8', offset, rowCount, entityIndex)
+      data.fill(column, 'u32@8', offset + 4, rowCount, generation)
+    elseif type(value) == 'number' then
+      data.fill(column, FieldTypes[field.kind].element, offset, rowCount, value)
+    else
+      -- Not a number: buffer.write* converts it or refuses it, and a fill would only refuse.
+      for row = firstRow, firstRow + rowCount - 1 do
+        field.write(column, row * field.width, value)
+      end
+    end
+  end
+end
+
+-- Points the locator slot of every entity in rows [firstRow, firstRow + rowCount) of a chunk at
+-- its row. Each has been located before, so its page exists and its generation stands.
+local function locateRun(
+  pages: { buffer },
+  entityIds: buffer,
+  firstRow: number,
+  rowCount: number,
+  archetypeId: number,
+  chunkIndex: number
+)
+  local page, pageBase = pages[1], 0
+  for row = firstRow, firstRow + rowCount - 1 do
+    local slot = buffer.readu32(entityIds, row * 4) - 1
+    local within = slot - pageBase
+    -- Neighbouring rows mostly share a page, which saves finding it again for each of them.
+    if within < 0 or within >= EntityPageSize then
+      pageBase = slot - slot % EntityPageSize
+      page = pages[pageBase // EntityPageSize + 1]
+      within = slot - pageBase
     end
 
-    chunk.count += 1
+    local offset = within * EntityStride
+    buffer.writeu16(page, offset + 2, archetypeId)
+    buffer.writeu32(page, offset + 4, chunkIndex + row * 65536)
+  end
+end
+
+-- Locates the slots [firstIndex, firstIndex + count), none of which has held an entity, at the
+-- rows from firstRow on. Generation one and the archetype are the same for all of them, so that
+-- half of every slot is one fill a page; only the row differs.
+local function locateFresh(
+  pages: { buffer },
+  firstIndex: number,
+  count: number,
+  archetypeId: number,
+  chunkIndex: number,
+  firstRow: number
+)
+  local done = 0
+  while done < count do
+    local slot = firstIndex + done - 1
+    local pageIndex = slot // EntityPageSize + 1
+    local page = pages[pageIndex]
+    if not page then
+      page = buffer.create(EntityPageSize * EntityStride)
+      pages[pageIndex] = page
+    end
+
+    local within = slot % EntityPageSize
+    local span = math.min(count - done, EntityPageSize - within)
+    local location = chunkIndex + (firstRow + done) * 65536
+    data.fill(page, 'u32@8', within * EntityStride, span, 1 + archetypeId * 65536)
+    for step = 0, span - 1 do
+      buffer.writeu32(page, (within + step) * EntityStride + 4, location + step * 65536)
+    end
+    done += span
+  end
+end
+
+function World:spawnBatch(count: number, components: { Component })
+  local ids = [for component in components => component.id]
+  table.sort(ids)
+  local archetype = self:_archetype(ids)
+  local archetypeId = archetype.id
+  local free = self._free
+  local remaining = math.floor(count)
+
+  while remaining > 0 do
+    local chunk, chunkIndex = self:_chunkForSpawn(archetype)
+    local row = chunk.count
+    -- The locator has no room for this chunk: one row is spawned as far as its slot, then refused.
+    local unlocatable = archetypeId > 65535 or chunkIndex > 65535
+    local take = if unlocatable then 1 else math.min(remaining, chunk.capacity - row)
+    local entityIds = chunk.entityIds
+
+    -- Freed slots are taken back first, newest first; the rest of the run is new ones in order.
+    local freeCount = #free
+    local reused = math.min(take, freeCount)
+    for offset = 0, reused - 1 do
+      buffer.writeu32(entityIds, (row + offset) * 4, free[freeCount - offset])
+      free[freeCount - offset] = nil
+    end
+
+    local firstFresh, freshCount = self._nextEntity + 1, take - reused
+    for offset = 0, freshCount - 1 do
+      buffer.writeu32(entityIds, (row + reused + offset) * 4, firstFresh + offset)
+    end
+    self._nextEntity += freshCount
+
+    -- Rows under the high-water mark have held data and take every field; fresh rows are zero
+    -- and take only the defaults that are not.
+    local used = math.clamp(chunk.highWater - row, 0, take)
+    for _, componentId in ids do
+      local component = self._components[componentId]
+      fillInitial(chunk, row, used, component, nil, false)
+      if component.needsFreshInit then fillInitial(chunk, row + used, take - used, component, nil, true) end
+    end
+
+    chunk.count = row + take
     if chunk.count > chunk.highWater then chunk.highWater = chunk.count end
-    archetype.count += 1
-    self.count += 1
-    self:_setLocation(index, generation, archetype.id, chunkIndex, row)
+    archetype.count += take
+    self.count += take
+    if unlocatable then error('ecs: packed entity locator overflow') end
+
+    locateRun(self._entityPages, entityIds, row, reused, archetypeId, chunkIndex)
+    locateFresh(self._entityPages, firstFresh, freshCount, archetypeId, chunkIndex, row + reused)
+    remaining -= take
   end
 
   return archetype
