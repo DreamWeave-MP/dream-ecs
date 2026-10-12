@@ -431,7 +431,9 @@ local function spawnEach(world, archetype, ids: { number }, count: number)
 end
 
 function World:spawnBatch(count: number, components: { Component })
-  local ids = [for component in components => component.id]
+  local ids = {}
+  -- The caller's list is read as it comes: holes and entries without an id are skipped.
+  for _, component in components do table.insert(ids, component.id) end
   table.sort(ids)
   local archetype = self:_archetype(ids)
 
