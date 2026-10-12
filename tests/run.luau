@@ -157,6 +157,79 @@ suite.describe('packed entities and components', function()
     expect(world:get(world:_token(8), position.axisX)).toBe(8)
     expect(world:stats().chunks).toBe(3)
   end)
+
+  suite.it('writes a default the same bytes whether rows come one at a time or in bulk', function()
+    -- Past 2^63 an integer write wraps where a fill would saturate, and a numeric string is
+    -- converted by a write alone: every path has to agree with the single spawn.
+    local defaults = { 1e30, -1e30, math.huge, -math.huge, 9223372036854775808, 0 / 0, 300.75, -1, 0, '7' }
+
+    for _, kind in { 'u8', 'u16', 'u32', 'i32', 'f32', 'f64', 'entity' } do
+      for _, default in defaults do
+        if kind == 'entity' and type(default) == 'string' then continue end
+
+        local world = ecs.new({ chunkCapacity = 4 })
+        local sample = world:component('Sample', { cell = { type = kind, default = default } })
+        local marker = world:tag('Marker')
+        local cell = sample.cell
+
+        -- The cell's bytes in hex: a NaN compares unequal to itself, and raw bytes break a report.
+        local function stored(index: number): string
+          local chunk, row = world:locate(world:_token(index))
+          local column, offset = chunk:buffer(cell), row * cell.width
+          return table.concat([for byte in range(0, cell.width - 1) => string.format('%02x', buffer.readu8(column, offset + byte))])
+        end
+
+        world:spawn({ [sample] = {} })
+        local expected = stored(1)
+
+        -- Fresh rows across two chunks, then the rows and slots two destroyed entities leave.
+        world:spawnBatch(6, { sample })
+        for index = 2, 7 do
+          expect(stored(index)).toBe(expected)
+          world:set(world:_token(index), cell, 1)
+        end
+
+        world:destroy(world:_token(7))
+        world:destroy(world:_token(6))
+        world:spawnBatch(3, { sample })
+        for index = 6, 8 do expect(stored(index)).toBe(expected) end
+
+        -- A bulk add onto fresh rows by default, then onto used rows by value.
+        world:spawnBatch(5, { marker })
+        expect(world:addQuery('SELECT Marker FROM entities WHERE Sample = FALSE', sample)).toBe(5)
+        for index = 9, 13 do
+          expect(stored(index)).toBe(expected)
+          world:set(world:_token(index), cell, 1)
+        end
+
+        expect(world:removeQuery('SELECT Marker FROM entities', sample)).toBe(5)
+        expect(world:addQuery('SELECT Marker FROM entities WHERE Sample = FALSE', sample, { cell = default })).toBe(5)
+        for index = 9, 13 do expect(stored(index)).toBe(expected) end
+      end
+    end
+  end)
+
+  suite.it('stops a batch at its first row when a default or the count is refused', function()
+    local world, position = fixture()
+    local broken = world:component('Broken', { cell = { type = 'u8', default = 'heavy' } })
+    expect(function() world:spawnBatch(6, { position, broken }) end).toThrow 'writeu8'
+    expect(function() world:spawnBatch('several', { position }) end).toThrow "'for' limit"
+    expect(world.count).toBe(0)
+    expect(world:query('SELECT Position FROM entities'):count()).toBe(0)
+
+    -- The refused row had taken a slot, and only that one.
+    expect(world:spawn({ [position] = {} })).toBe(4294967296 + 2)
+    expect(world:spawnBatch(5, { position }).count).toBe(6)
+    expect(world.count).toBe(6)
+  end)
+
+  suite.it('reads a batch\'s component list as it comes, holes skipped', function()
+    local world, position, _, _, frozen = fixture()
+    world:spawnBatch(3, { position, nil, frozen })
+    expect(world:query('SELECT Position, Frozen FROM entities'):count()).toBe(3)
+    expect(function() world:spawnBatch(3) end).toThrow 'iterate over a nil value'
+    expect(world.count).toBe(3)
+  end)
 end)
 
 suite.describe('compiled JessQL hot queries', function()
@@ -323,6 +396,27 @@ suite.describe('relations and structural mutation', function()
       expect(world:get(entity, position.axisX)).toBe(index)
       expect(world:get(entity, health.value)).toBe(100)
     end
+  end)
+
+  suite.it('reads bulk-added values a row at a time when they come through a metatable', function()
+    local world, position, _, health = fixture()
+    world:spawnBatch(6, { position })
+
+    local reads = 0
+    local counted = setmetatable({}, {
+      __index = function()
+        reads += 1
+        return reads
+      end,
+    })
+    expect(world:addQuery('SELECT Position FROM entities', health, counted)).toBe(6)
+    for index = 1, 6 do expect(world:get(world:_token(index), health.value)).toBe(index) end
+
+    -- Values that cannot be read fail the add before any entity has moved.
+    local bare = world:query('SELECT Position FROM entities WHERE Health = FALSE')
+    world:spawnBatch(2, { position })
+    expect(function() world:addQuery(bare, health, true) end).toThrow 'index boolean'
+    expect(bare:count()).toBe(2)
   end)
 
   suite.it('keeps relation edges exact through removal, re-adding and index growth', function()
