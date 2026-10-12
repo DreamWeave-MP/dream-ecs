@@ -51,6 +51,112 @@ suite.describe('packed entities and components', function()
     expect(world:valid(stale)).toBe(false)
     expect(stale == replacement).toBe(false)
   end)
+
+  suite.it('round-trips every field kind through spawn, set and get', function()
+    local world = ecs.new({ chunkCapacity = 4 })
+    local sample = world:component('Sample', {
+      byte = 'u8', short = 'u16', word = 'u32', signed = 'i32', single = 'f32', double = 'f64',
+      flag = 'bool', other = 'entity',
+    })
+    local target = world:spawn()
+    local entity = world:spawn({
+      [sample] = {
+        byte = 200, short = 60000, word = 4000000000, signed = -7, single = 0.5, double = 0.1,
+        flag = true, other = target,
+      },
+    })
+    expect(world:get(entity, sample.byte)).toBe(200)
+    expect(world:get(entity, sample.short)).toBe(60000)
+    expect(world:get(entity, sample.word)).toBe(4000000000)
+    expect(world:get(entity, sample.signed)).toBe(-7)
+    expect(world:get(entity, sample.single)).toBe(0.5)
+    expect(world:get(entity, sample.double)).toBe(0.1)
+    expect(world:get(entity, sample.flag)).toBe(true)
+    expect(world:get(entity, sample.other)).toBe(target)
+
+    expect(world:set(entity, sample.byte, 257)).toBe(true)
+    expect(world:set(entity, sample.short, 65537)).toBe(true)
+    expect(world:set(entity, sample.word, 7)).toBe(true)
+    expect(world:set(entity, sample.signed, -2147483648)).toBe(true)
+    expect(world:set(entity, sample.single, 16777217)).toBe(true)
+    expect(world:set(entity, sample.double, -1e300)).toBe(true)
+    expect(world:set(entity, sample.flag, false)).toBe(true)
+    expect(world:set(entity, sample.other, entity)).toBe(true)
+    expect(world:get(entity, sample.byte)).toBe(1)
+    expect(world:get(entity, sample.short)).toBe(1)
+    expect(world:get(entity, sample.word)).toBe(7)
+    expect(world:get(entity, sample.signed)).toBe(-2147483648)
+    expect(world:get(entity, sample.single)).toBe(16777216)
+    expect(world:get(entity, sample.double)).toBe(-1e300)
+    expect(world:get(entity, sample.flag)).toBe(false)
+    expect(world:get(entity, sample.other)).toBe(entity)
+
+    local empty = world:spawn({ [sample] = {} })
+    expect(world:get(empty, sample.word)).toBe(0)
+    expect(world:get(empty, sample.flag)).toBe(false)
+    expect(world:get(empty, sample.other)).toBe(nil)
+    expect(world:set(target, sample.byte, 1)).toBe(false)
+    expect(world:get(target, sample.byte)).toBe(nil)
+  end)
+
+  suite.it('spawns batches across chunks with defaults, and reuses freed slots and rows', function()
+    local world, position, _, health = fixture()
+    local armor = world:component('Armor', { rating = { type = 'u8', default = 3 }, plate = 'u16' })
+    expect(world:spawnBatch(0, { position }).count).toBe(0)
+    expect(world:spawnBatch(10, { armor, position, health }).count).toBe(10)
+    expect(world.count).toBe(10)
+    expect(world:stats().chunks).toBe(3)
+
+    local movers = world:query('SELECT Position, Health, Armor FROM entities')
+    local rows, chunkCounts = 0, {}
+    for chunk in movers:chunks() do
+      chunkCounts[#chunkCounts + 1] = chunk.count
+      for row = 0, chunk.count - 1 do
+        rows += 1
+        local entity = chunk:entity(row)
+        expect(entity).toBe(world:_token(rows))
+        expect(entity).toBe(4294967296 + rows)
+        expect(buffer.readu32(chunk:entities(), row * 4)).toBe(rows)
+        expect(world:get(entity, health.value)).toBe(100)
+        expect(world:get(entity, armor.rating)).toBe(3)
+        expect(world:get(entity, armor.plate)).toBe(0)
+        expect(world:get(entity, position.axisX)).toBe(0)
+        local located, locatedRow = world:locate(entity)
+        expect(located).toBe(chunk)
+        expect(locatedRow).toBe(row)
+        world:set(entity, position.axisX, rows)
+        world:set(entity, health.value, rows)
+        world:set(entity, armor.plate, rows)
+      end
+    end
+    expect(rows).toBe(10)
+    expect(chunkCounts[1]).toBe(4)
+    expect(chunkCounts[2]).toBe(4)
+    expect(chunkCounts[3]).toBe(2)
+
+    -- The tenth entity's row and slot are both reused: the row must hold defaults again, and the
+    -- slot's handle carries the next generation.
+    expect(world:destroy(world:_token(10))).toBe(true)
+    expect(world:destroy(world:_token(9))).toBe(true)
+    world:spawnBatch(4, { position, health, armor })
+    expect(world.count).toBe(12)
+    expect(movers:count()).toBe(12)
+    expect(world:valid(4294967296 + 9)).toBe(false)
+
+    local expected = { 2 * 4294967296 + 9, 2 * 4294967296 + 10, 4294967296 + 11, 4294967296 + 12 }
+    for spawned, entity in expected do
+      expect(world:valid(entity)).toBe(true)
+      local chunk, row = world:locate(entity)
+      expect(row).toBe(spawned - 1)
+      expect(chunk:entity(row)).toBe(entity)
+      expect(world:get(entity, position.axisX)).toBe(0)
+      expect(world:get(entity, health.value)).toBe(100)
+      expect(world:get(entity, armor.rating)).toBe(3)
+      expect(world:get(entity, armor.plate)).toBe(0)
+    end
+    expect(world:get(world:_token(8), position.axisX)).toBe(8)
+    expect(world:stats().chunks).toBe(3)
+  end)
 end)
 
 suite.describe('compiled JessQL hot queries', function()
@@ -181,6 +287,73 @@ suite.describe('relations and structural mutation', function()
     expect(commands:flush()).toBe(1)
     expect(movers:count()).toBe(0)
   end)
+
+  suite.it('bulk-migrates runs that split across chunks, keeping rows, handles and defaults', function()
+    local world, position, velocity, health = fixture()
+    world:spawnBatch(2, { position, velocity, health })
+    world:spawnBatch(11, { position, velocity })
+    for index = 1, 13 do world:set(world:_token(index), position.axisX, index) end
+
+    local bare = world:query('SELECT Position, Velocity FROM entities WHERE Health = FALSE')
+    local healthy = world:query('SELECT Position, Velocity, Health FROM entities')
+    expect(world:addQuery(bare, health, { value = 75 })).toBe(11)
+    expect(bare:count()).toBe(0)
+    expect(healthy:count()).toBe(13)
+
+    for index = 1, 13 do
+      local entity = world:_token(index)
+      local chunk, row = world:locate(entity)
+      expect(chunk:entity(row)).toBe(entity)
+      expect(world:get(entity, position.axisX)).toBe(index)
+      expect(world:get(entity, health.value)).toBe(if index <= 2 then 100 else 75)
+      world:set(entity, health.value, index)
+    end
+
+    -- Moving out and back lands on rows both archetypes have used before: the component comes
+    -- back as its default there, not as what those rows last held. Only an archetype's last chunk
+    -- is refilled, so the emptied ones before it stay behind.
+    expect(world:removeQuery(healthy, health)).toBe(13)
+    expect(world:addQuery(bare, health)).toBe(13)
+    expect(world:stats().chunks).toBe(13)
+
+    for index = 1, 13 do
+      local entity = world:_token(index)
+      local chunk, row = world:locate(entity)
+      expect(chunk:entity(row)).toBe(entity)
+      expect(world:get(entity, position.axisX)).toBe(index)
+      expect(world:get(entity, health.value)).toBe(100)
+    end
+  end)
+
+  suite.it('keeps relation edges exact through removal, re-adding and index growth', function()
+    local world = ecs.new()
+    local link = world:relation('Link')
+    world:spawnBatch(2001, {})
+    local hub = world:_token(2001)
+    for index = 1, 2000 do expect(world:relate(link, world:_token(index), hub)).toBe(true) end
+    expect(world:relate(link, world:_token(7), hub)).toBe(false)
+    for index = 1, 2000, 2 do expect(world:unrelate(link, world:_token(index), hub)).toBe(true) end
+    expect(world:unrelate(link, world:_token(1), hub)).toBe(false)
+    for index = 1, 2000, 4 do expect(world:relate(link, world:_token(index), hub)).toBe(true) end
+
+    local store = world._relationStores[link.id]
+    expect(store.count).toBe(1500)
+    for index = 1, 2000 do
+      expect(store:has(index, 2001)).toBe(index % 2 == 0 or index % 4 == 1)
+      expect(store:has(2001, index)).toBe(false)
+    end
+
+    -- An endpoint's edges come back newest first.
+    local sources = {}
+    for source in world:sources(link, hub) do sources[#sources + 1] = source end
+    expect(#sources).toBe(1500)
+    expect(sources[1]).toBe(world:_token(1997))
+    expect(sources[500]).toBe(world:_token(1))
+    expect(sources[501]).toBe(world:_token(2000))
+    expect(sources[1500]).toBe(world:_token(2))
+    expect(world:targets(link, world:_token(1997))()).toBe(hub)
+    expect(world:targets(link, world:_token(1999))()).toBe(nil)
+  end)
 end)
 
 suite.describe('packed transient events', function()
@@ -206,6 +379,41 @@ suite.describe('packed transient events', function()
 
     world:clearEvents()
     expect(hit.count).toBe(0)
+  end)
+
+  suite.it('emits every event field kind across blocks, defaults included', function()
+    local world = ecs.new()
+    local owner = world:spawn()
+    local sample = world:event('Sample', {
+      tiny = 'u8', small = 'u16', wide = 'u32', delta = 'i32', ratio = { type = 'f32', default = 1.5 },
+      exact = 'f64', flag = 'bool', other = 'entity',
+    }, { blockCapacity = 2 })
+    local first = { tiny = 200, small = 60000, wide = 4000000000, delta = -7, ratio = 0.5, exact = 0.1, flag = true, other = owner }
+    expect(sample:emit(first)).toBe(0)
+    expect(sample:emit()).toBe(1)
+    expect(sample:emit({ tiny = 257, small = 65537, ratio = 16777217, flag = false })).toBe(0)
+    expect(sample.count).toBe(3)
+    expect(sample:bytes()).toBe(2 * 2 * 30)
+
+    local rows = world:sql():query('SELECT tiny, small, wide, delta, ratio, exact, flag, other FROM Sample').rows
+    expect(#rows).toBe(3)
+    expect(rows[1].tiny).toBe(200)
+    expect(rows[1].small).toBe(60000)
+    expect(rows[1].wide).toBe(4000000000)
+    expect(rows[1].delta).toBe(-7)
+    expect(rows[1].ratio).toBe(0.5)
+    expect(rows[1].exact).toBe(0.1)
+    expect(rows[1].flag).toBe(true)
+    expect(rows[1].other).toBe(owner)
+    expect(rows[2].tiny).toBe(0)
+    expect(rows[2].wide).toBe(0)
+    expect(rows[2].ratio).toBe(1.5)
+    expect(rows[2].exact).toBe(0)
+    expect(rows[2].other).toBe(nil)
+    expect(rows[3].tiny).toBe(1)
+    expect(rows[3].small).toBe(1)
+    expect(rows[3].ratio).toBe(16777216)
+    expect(rows[3].flag).toBe(false)
   end)
 end)
 
@@ -256,6 +464,36 @@ suite.describe('indexed relational SQL', function()
     expect(entity).toBe(first)
     expect(buffer.readf32(chunk:buffer(position.axisX), row * 4)).toBe(3)
     expect(iterator()).toBe(nil)
+  end)
+
+  suite.it('tests relation rows against where each entity is now, not where it was', function()
+    local world, position, _, _, frozen = fixture()
+    local parentRelation = world:relation('Parent')
+    local parent = world:spawn()
+    local child = world:spawn({ [position] = { axisX = 3 } })
+    world:relate(parentRelation, child, parent)
+
+    local children = world:query([[
+      SELECT e.entity, Position
+      FROM relations r INNER JOIN entities e ON r.source = e.entity
+      WHERE r.relation = 'Parent' AND r.target = ? AND e.Frozen = FALSE
+    ]])
+    expect(children:count({ parent })).toBe(1)
+    world:add(child, frozen)
+    expect(children:count({ parent })).toBe(0)
+    world:remove(child, frozen)
+    expect(children:count({ parent })).toBe(1)
+    world:remove(child, position)
+    expect(children:count({ parent })).toBe(0)
+
+    local armor = world:component('Armor', { rating = 'u8' })
+    world:add(child, position, { axisX = 5 })
+    world:add(child, armor)
+    local entity, chunk, row = children:rows({ parent })()
+    expect(entity).toBe(child)
+    expect(buffer.readf32(chunk:buffer(position.axisX), row * 4)).toBe(5)
+    expect(children:count({ world:spawn() })).toBe(0)
+    expect(children:count({ 123456789 })).toBe(0)
   end)
 
   suite.it('compacts dead relation history without changing live edges', function()
