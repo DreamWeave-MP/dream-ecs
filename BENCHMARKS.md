@@ -107,3 +107,54 @@ column[1:count, 'f32'] => impulse]`, which l3i lowers to one data-plane call a c
 rows in 4,096-row blocks the loop took 1.54 ms and the reduction about 0.6 ms. That is what the data
 plane buys a system that reduces a column; the package's own frame-loop surface is still raw
 buffers, and a read-modify-write loop like movement has no bulk form to move to.
+
+## Rerun after review
+
+A review of the change found that a fill does not write every value the way `buffer.write*`
+does: a number of 2^63 or more saturates an integer field through `data.fill` where the write
+leaves zero, a numeric string is refused where the write converts it, and a batch that was going
+to fail took a whole run of entity slots before it did. `5e8ac1d` and `c9c8f28` fixed that.
+`spawnBatch` and the bulk adds now look at their values first, and anything but plain numbers a
+fill and a write agree on (below 2^53 for the integer kinds and entity handles) goes through the
+row-at-a-time loop the base had, as does a count that is not a number.
+
+The A/B was then run again the same way at `b5dd562`, base `19fcd35`, five rounds, medians. The
+machine was busier, so both sides are about eight percent slower than in the table above. The
+ratios stand: the check costs nothing that shows.
+
+| File | Workload | Base | Head | Base / head |
+|---|---|---:|---:|---:|
+| `spawn` | `spawnBatch`, 1,000,000 × Position + Velocity | 213.5 ms | 18.3 ms | 11.7x |
+| `spawn` | `spawnBatch`, 1,000,000 × Position + Health | 380.0 ms | 17.6 ms | 21.6x |
+| `spawn` | `spawnBatch`, 250,000 into freed slots and used rows | 91.6 ms | 6.24 ms | 14.7x |
+| `structural` | `spawnBatch`, 200,000 | 40.9 ms | 3.73 ms | 11.0x |
+| `movement_fair` | `spawnBatch`, 1,048,576 | 224.8 ms | 20.1 ms | 11.2x |
+| `movement` | `spawnBatch`, 262,144, 1,024-row chunks | 56.8 ms | 4.76 ms | 11.9x |
+| `bulk_structural` | `addQuery` of a tag, 200,000 | 19.8 ms | 3.78 ms | 5.2x |
+| `bulk_structural` | `removeQuery` of a tag, 200,000 | 16.3 ms | 3.76 ms | 4.3x |
+| `bulk_data` | `addQuery` of Health with values, 200,000 | 40.7 ms | 4.57 ms | 8.9x |
+| `bulk_data` | `removeQuery` of Health, 200,000 | 15.8 ms | 3.98 ms | 4.0x |
+| `bulk_data` | `addQuery` of Health, defaults over used rows | 46.1 ms | 4.23 ms | 10.9x |
+| `relation` | `relate`, 200,000 edges | 278.2 ms | 168.7 ms | 1.65x |
+| `relation_hot` | hot relation query, 200 rows a query | 45.70 µs | 30.05 µs | 1.52x |
+| `structural` | `add` of a tag, 50,000 | 51.3 ms | 44.3 ms | 1.16x |
+| `structural` | `remove` of a tag, 50,000 | 51.4 ms | 43.5 ms | 1.18x |
+| `structural` | `add` of Health with values, 50,000 | 62.8 ms | 54.3 ms | 1.16x |
+| `structural` | `remove` of Health, 50,000 | 53.2 ms | 45.8 ms | 1.16x |
+| `bulk_structural` | `add` of a tag one entity at a time, 200,000 | 201.7 ms | 178.5 ms | 1.13x |
+| `structural` | random `get` + `set`, 800,000 pairs | 272.8 ms | 251.1 ms | 1.09x |
+| `component_scan` | `COUNT(*), AVG(axisX)` over 1,000,000 Position rows | 250.7 ms | 229.9 ms | 1.09x |
+
+A second run of five rounds straight after agreed with this one on every row above, to within
+seven percent of each ratio, except the three `bulk_data` rows, which came out 8 to 11 percent
+higher (9.8x, 4.3x and 11.8x): each is one sample of about 4 ms. Single-entity `add` and `remove`
+came out at 1.16x to 1.18x both times, nearer that than the 1.2x of the first table. The component
+scan gave 1.09x and then 1.05x, with base and head samples overlapping in both runs: still not a
+number to lean on.
+
+The rows of "What did not" were again within five percent, with these exceptions, none of them
+repeated by the other run except the first: `destroy` in `spawn` (1.05x and 1.06x; its entities
+die newest first, so the path runs no line that changed), `query` compile (1.12x, then 1.00x),
+`query` cached lookup (1.08x, then 1.00x), `events_reserve` (1.06x, then 0.97x) and the
+`component_sql` join (1.04x, then 1.11x). Those are short single samples. The event column summed
+in 1.70 ms by the row loop and 0.64 ms by the typed-slice reduction.
