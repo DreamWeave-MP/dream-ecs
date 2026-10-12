@@ -85,36 +85,51 @@ local function findSlot(store, source, target)
   return false, firstTombstone
 end
 
-local function insertHash(store, edgeId, source, target)
-  local _, slot = findSlot(store, source, target)
-  if slot == nil then error('ecs: relation hash is full') end
+-- Puts an edge in the slot findSlot offered for its pair.
+local function claimSlot(store, slot: number?, edgeId: number)
+  if not slot then error('ecs: relation hash is full') end
   if buffer.readu32(store._hash, slot * 4) == Tombstone then store._tombstones -= 1 end
   buffer.writeu32(store._hash, slot * 4, edgeId)
   store._hashUsed += 1
 end
 
-local function rehash(store, capacity)
+local function rehash(store, capacity: number)
   local old = store._hash
-  store._hash = buffer.create(capacity * 4)
+  local hash = buffer.create(capacity * 4)
+  store._hash = hash
   store._hashCapacity = capacity
   store._hashUsed = 0
   store._tombstones = 0
 
   if not old then return end
 
+  -- Live edges are all distinct and a new table has no tombstones, so each one's place is the
+  -- first empty slot of its probe: there is no pair to compare on the way.
+  local mask = capacity - 1
+  local used = 0
   for edgeId = 1, store._nextEdge - 1 do
-    if edgeActive(store, edgeId) then
-      local source, target = edgePair(store, edgeId)
-      insertHash(store, edgeId, source, target)
+    local source, target = edgePair(store, edgeId)
+    if source == 0 then continue end
+
+    local slot = bit32.band(hashPair(source, target), mask)
+    while buffer.readu32(hash, slot * 4) ~= EmptySlot do
+      slot = bit32.band(slot + 1, mask)
     end
+
+    buffer.writeu32(hash, slot * 4, edgeId)
+    used += 1
   end
+  store._hashUsed = used
 end
 
-local function ensureHash(store)
+-- Makes room for one more edge, and says whether that moved every slot.
+local function ensureHash(store): boolean
   local occupied = store._hashUsed + store._tombstones + 1
-  if occupied * 10 < store._hashCapacity * 7 then return end
+  if occupied * 10 < store._hashCapacity * 7 then return false end
+
   local capacity = if store._hashUsed * 10 >= store._hashCapacity * 5 then store._hashCapacity * 2 else store._hashCapacity
   rehash(store, capacity)
+  return true
 end
 
 local function appendEdge(store, source, target)
@@ -155,11 +170,15 @@ function RelationStore.new(definition)
 end
 
 function RelationStore:add(source, target)
-  local found = findSlot(self, source, target)
+  local found, slot = findSlot(self, source, target)
   if found then return false end
-  ensureHash(self)
-  local edgeId = appendEdge(self, source, target)
-  insertHash(self, edgeId, source, target)
+
+  -- The slot the lookup stopped at is where the edge goes, unless making room moved the slots.
+  if ensureHash(self) then
+    found, slot = findSlot(self, source, target)
+  end
+
+  claimSlot(self, slot, appendEdge(self, source, target))
   self.count += 1
   return true
 end
