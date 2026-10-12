@@ -75,18 +75,14 @@ function Query:chunks()
 end
 
 function Query:count()
-  local count = 0
-  for _, archetype in self._archetypes do
-    count += archetype.count
-  end
-  return count
+  return sum[for archetype in self._archetypes => archetype.count]
 end
 
 function Query:explain()
-  local required, excluded, archetypes = {}, {}, {}
+  local required, excluded = {}, {}
   for componentId in pairs(self._all) do table.insert(required, self._world._components[componentId].name) end
   for componentId in pairs(self._none) do table.insert(excluded, self._world._components[componentId].name) end
-  for _, archetype in self._archetypes do table.insert(archetypes, archetype.id) end
+  local archetypes = [for archetype in self._archetypes => archetype.id]
   table.sort(required)
   table.sort(excluded)
   return {
