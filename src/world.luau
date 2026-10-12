@@ -35,6 +35,7 @@ local EntityPageSize = 65536
 local EntityStride = 8
 local DefaultChunkCapacity = 8192
 local TokenScale = 4294967296
+local FillLimit = 9007199254740992
 
 -- `element` is the field as @dream/data spells it, for the kinds one fill can write.
 local FieldTypes = {
@@ -290,8 +291,32 @@ local function writeInitial(world, chunk, row, component, values, fresh)
   end
 end
 
+-- Whether fillInitial writes a component's rows exactly what writeInitial would, raising nothing.
+-- A fill and a buffer.write* turn a number into an integer the same way only inside FillLimit
+-- (past 2^63 a fill saturates where a write wraps), and a fill refuses the numeric strings a write
+-- converts. Those, values a write refuses, and values read through a metatable go a row at a time.
+local function fillsExactly(component: Component?, given: unknown): boolean
+  if not component then return false end
+  if component.tag then return true end
+  if given and (type(given) ~= 'table' or getmetatable(given) ~= nil) then return false end
+
+  local values = given :: { [string]: unknown }?
+  for _, field in component.fields do
+    if field.kind == 'bool' then continue end
+
+    local value = if values then values[field.name] else nil
+    if value == nil then value = field.default or 0 end
+    if type(value) ~= 'number' then return false end
+    if field.kind == 'f32' or field.kind == 'f64' then continue end
+    if not (math.abs(value) < FillLimit) then return false end
+  end
+
+  return true
+end
+
 -- writeInitial for one component over the rows [firstRow, firstRow + rowCount) of a chunk: every
--- row gets the same values, so each field is one fill of its column.
+-- row gets the same values, so each field is one fill of its column. Only for values fillsExactly
+-- has passed.
 local function fillInitial(
   chunk: Chunk,
   firstRow: number,
@@ -304,7 +329,7 @@ local function fillInitial(
 
   local values = given or {}
   for _, field in component.fields do
-    local value = initialValue(field, values, fresh)
+    local value = initialValue(field, values, fresh) :: number?
     if value == nil then continue end
 
     local column = chunk.columns[field.id]
@@ -317,13 +342,8 @@ local function fillInitial(
 
       data.fill(column, 'u32@8', offset, rowCount, entityIndex)
       data.fill(column, 'u32@8', offset + 4, rowCount, generation)
-    elseif type(value) == 'number' then
-      data.fill(column, FieldTypes[field.kind].element, offset, rowCount, value)
     else
-      -- Not a number: buffer.write* converts it or refuses it, and a fill would only refuse.
-      for row = firstRow, firstRow + rowCount - 1 do
-        field.write(column, row * field.width, value)
-      end
+      data.fill(column, FieldTypes[field.kind].element, offset, rowCount, value)
     end
   end
 end
@@ -387,10 +407,39 @@ local function locateFresh(
   end
 end
 
+-- spawnBatch a row at a time, for what the runs below cannot carry: a count that is not a number,
+-- which this loop refuses, and defaults fillsExactly turns away.
+local function spawnEach(world, archetype, ids: { number }, count: number)
+  for _ = 1, count do
+    local chunk, chunkIndex = world:_chunkForSpawn(archetype)
+    local row = chunk.count
+    local index, generation = world:_allocateEntity()
+    buffer.writeu32(chunk.entityIds, row * 4, index)
+
+    local fresh = row >= chunk.highWater
+    for _, componentId in ids do
+      local component = world._components[componentId]
+      if not fresh or component.needsFreshInit then writeInitial(world, chunk, row, component, nil, fresh) end
+    end
+
+    chunk.count += 1
+    if chunk.count > chunk.highWater then chunk.highWater = chunk.count end
+    archetype.count += 1
+    world.count += 1
+    world:_setLocation(index, generation, archetype.id, chunkIndex, row)
+  end
+end
+
 function World:spawnBatch(count: number, components: { Component })
   local ids = [for component in components => component.id]
   table.sort(ids)
   local archetype = self:_archetype(ids)
+
+  if type(count) ~= 'number' or not all[for componentId in ids => fillsExactly(self._components[componentId], nil)] then
+    spawnEach(self, archetype, ids, count)
+    return archetype
+  end
+
   local archetypeId = archetype.id
   local free = self._free
   local remaining = math.floor(count)
@@ -622,6 +671,7 @@ end
 function World:_migrateArchetype(sourceArchetype, targetArchetype, added, addedValue)
   if sourceArchetype == targetArchetype or sourceArchetype.count == 0 then return 0 end
   local moved = sourceArchetype.count
+  local filled = added == nil or fillsExactly(self._components[added], addedValue)
 
   for _, sourceChunk in sourceArchetype.chunks do
     local sourceCount = sourceChunk.count
@@ -635,10 +685,14 @@ function World:_migrateArchetype(sourceArchetype, targetArchetype, added, addedV
       buffer.copy(targetChunk.entityIds, targetRow * 4, sourceChunk.entityIds, sourceRow * 4, take * 4)
       for _, componentId in targetArchetype.componentIds do
         local component = self._components[componentId]
-        if componentId == added then
+        if componentId == added and filled then
           local used = math.clamp(targetChunk.highWater - targetRow, 0, take)
           fillInitial(targetChunk, targetRow, used, component, addedValue, false)
           fillInitial(targetChunk, targetRow + used, take - used, component, addedValue, true)
+        elseif componentId == added then
+          for rowOffset = 0, take - 1 do
+            writeInitial(self, targetChunk, targetRow + rowOffset, component, addedValue, targetRow + rowOffset >= targetChunk.highWater)
+          end
         elseif sourceArchetype.has[componentId] then
           for _, field in component.fields do
             buffer.copy(
