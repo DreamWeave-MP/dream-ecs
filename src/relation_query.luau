@@ -147,6 +147,7 @@ local function compile(world, text, parsed)
     _bound = bound,
     _all = all,
     _none = none,
+    _matching = {},
     selected = selected,
     sql = text,
     kind = 'relation',
@@ -179,6 +180,9 @@ function RelationQuery:rows(params)
   local store = world._relationStores[self._relation.id]
   local iterator = if self._joinedEndpoint == 'source' then store:sources(boundIndex) else store:targets(boundIndex)
   local all, none = self._all, self._none
+  -- An archetype's components never change, so whether it satisfies the query is decided once
+  -- and remembered by its id.
+  local matching: { [number]: boolean } = self._matching
 
   return function()
     while true do
@@ -187,9 +191,13 @@ function RelationQuery:rows(params)
       local generation, archetypeId, chunkIndex, row = world:_locationIndex(index)
       if archetypeId then
         local archetype = world._archetypes[archetypeId]
-        if matches(archetype, all, none) then
-          return generation * 4294967296 + index, archetype.chunks[chunkIndex], row
+        local matched = matching[archetypeId]
+        if matched == nil then
+          matched = matches(archetype, all, none)
+          matching[archetypeId] = matched
         end
+
+        if matched then return generation * 4294967296 + index, archetype.chunks[chunkIndex], row end
       end
     end
   end
