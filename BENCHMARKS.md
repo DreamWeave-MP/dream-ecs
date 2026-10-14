@@ -17,7 +17,7 @@ package, base then head, five rounds, all eighteen files inside one hold of the 
 
 ```sh
 flock ~/.cache/agents-bench.lock systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=0 \
-  jess run --package <base export | jpk/dream-ecs> --package-path jpk <package>/bench/<file>.luau
+  jess run --package <base export | jpk/dream-ecs> --package-path jpk <package>/bench/<file>.jsl
 ```
 
 The numbers are the median of the five values each file printed. Most files time one pass of
@@ -101,7 +101,7 @@ enough to the noise that it should not be leaned on.
 The dialect conversions in cold code (the SQL metadata rows, provider lists, `Query:count`, event
 columns) measure as nothing, which is what a comprehension is supposed to cost.
 
-One number that is not an A/B: `events.luau` now sums the same event column twice, with the
+One number that is not an A/B: `events.jsl` now sums the same event column twice, with the
 row loop it always had and with a typed-slice reduction, `sum[for impulse in
 column[1:count, 'f32'] => impulse]`, which l3i lowers to one data-plane call a chunk. Over 500,000
 rows in 4,096-row blocks the loop took 1.54 ms and the reduction about 0.6 ms. That is what the data
