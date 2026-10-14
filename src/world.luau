@@ -268,7 +268,14 @@ local function initialValue(field: Field, values: { [string]: unknown }, fresh: 
   return value
 end
 
-local function writeInitial(world, chunk, row, component, values, fresh)
+local function writeInitial(
+  world: unknown,
+  chunk: Chunk,
+  row: number,
+  component: Component,
+  values: { [string]: unknown }?,
+  fresh: boolean
+)
   if component.tag then return end
   values = values or {}
   for _, field in component.fields do
@@ -447,7 +454,7 @@ function World:spawnBatch(count: number, components: { Component })
   local remaining = math.floor(count)
 
   while remaining > 0 do
-    local chunk, chunkIndex = self:_chunkForSpawn(archetype)
+    local chunk: Chunk, chunkIndex: number = self:_chunkForSpawn(archetype)
     local row = chunk.count
     -- The locator has no room for this chunk: one row is spawned as far as its slot, then refused.
     local unlocatable = archetypeId > 65535 or chunkIndex > 65535
@@ -472,7 +479,7 @@ function World:spawnBatch(count: number, components: { Component })
     -- and take only the defaults that are not.
     local used = math.clamp(chunk.highWater - row, 0, take)
     for _, componentId in ids do
-      local component = self._components[componentId]
+      local component: Component = self._components[componentId]
       fillInitial(chunk, row, used, component, nil, false)
       if component.needsFreshInit then fillInitial(chunk, row + used, take - used, component, nil, true) end
     end
@@ -679,14 +686,14 @@ function World:_migrateArchetype(sourceArchetype, targetArchetype, added, addedV
     local sourceCount = sourceChunk.count
     local sourceRow = 0
     while sourceRow < sourceCount do
-      local targetChunk, targetChunkIndex = self:_chunkForSpawn(targetArchetype)
+      local targetChunk: Chunk, targetChunkIndex: number = self:_chunkForSpawn(targetArchetype)
       local targetRow = targetChunk.count
       local available = targetChunk.capacity - targetRow
       local take = math.min(sourceCount - sourceRow, available)
 
       buffer.copy(targetChunk.entityIds, targetRow * 4, sourceChunk.entityIds, sourceRow * 4, take * 4)
       for _, componentId in targetArchetype.componentIds do
-        local component = self._components[componentId]
+        local component: Component = self._components[componentId]
         if componentId == added and filled then
           local used = math.clamp(targetChunk.highWater - targetRow, 0, take)
           fillInitial(targetChunk, targetRow, used, component, addedValue, false)

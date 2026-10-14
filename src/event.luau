@@ -32,7 +32,7 @@ local function decodeToken(token)
   return token - generation * TokenScale, generation
 end
 
-local function newChunk(store)
+local function newChunk(store: { fields: { { width: number } }, blockCapacity: number })
   -- A field's id is its place in the list, so the columns are the list mapped.
   local columns = [for field in store.fields => buffer.create(store.blockCapacity * field.width)]
   return setmetatable({ count = 0, capacity = store.blockCapacity, columns = columns }, EventChunk)
