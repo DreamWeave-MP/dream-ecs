@@ -158,3 +158,93 @@ die newest first, so the path runs no line that changed), `query` compile (1.12x
 `query` cached lookup (1.08x, then 1.00x), `events_reserve` (1.06x, then 0.97x) and the
 `component_sql` join (1.04x, then 1.11x). Those are short single samples. The event column summed
 in 1.70 ms by the row loop and 0.64 ms by the typed-slice reduction.
+
+## Which modules are native, and why
+
+Jess compiles to machine code only what is marked (`--!native` on a module, `@native` on one
+function), and every load pays for what is marked. A module carries `--!native` when a row below
+spends its time there and the module is small (12 KB or less); a larger module carries `@native`
+on the functions the row spends its time in, and nothing else.
+
+Measured 2026-10-15 with `jess 0.1.0`, the verified release build of jess `07c38cb` on l3i
+2.0.3, on the i7-10870H, the one-minute load 1.25 and 1.27 at the start of the two
+sessions. In each session the bench ran alternately on this package and on a copy of it with
+every module marked, three fresh runs of `bench/bench.jsl` each, every run's row the median of
+its batches; a column is the median of the three, and a ratio is against the all-marked runs of
+the same session. Which functions a row spends its time in comes from `jess run --profile` of
+that row alone, unmarked. The load cost is a fresh `jess run --package <this package>
+--package-path jpk` of a script that only requires `@dream/ecs`, the two sides alternating, the
+median of five each after one warm-up.
+
+| Requiring `@dream/ecs` | All marked | This state |
+| --- | ---: | ---: |
+| Unmarked | 0.091 s | 0.068 s |
+| Final | 0.090 s | 0.077 s |
+
+| Row | All marked (ms) | Unmarked / all marked | Final (ms) | Final / all marked |
+| --- | ---: | ---: | ---: | ---: |
+| bulk_data seconds | 3.902 | **3.408×** | 4.027 | 1.032× |
+| bulk_data remove_s | 3.183 | **3.703×** | 3.055 | 0.960× |
+| bulk_data default_s | 3.738 | **3.422×** | 4.003 | **1.071×** |
+| bulk_structural individual_add_s | 162.7 | **3.002×** | 216.8 | **1.333×** |
+| bulk_structural bulk_add_s | 3.283 | **4.324×** | 3.271 | 0.996× |
+| bulk_structural bulk_remove_s | 3.263 | **4.179×** | 3.411 | 1.045× |
+| component_scan seconds | 205.6 | **1.803×** | 204.9 | 0.997× |
+| component_sql direct_us | 0.00217 | **1.383×** | 0.00225 | 1.039× |
+| component_sql join_us | 0.00357 | **1.341×** | 0.00373 | 1.045× |
+| entity_field seconds | 356.2 | **2.076×** | 352.6 | 0.990× |
+| entity_field pairs_s | 2807461047.8 | 0.482× | 2836333368.0 | 1.010× |
+| events emit_s | 263.7 | **2.148×** | 265.9 | 1.009× |
+| events iterate_s | 7.357 | 0.995× | 7.489 | 1.018× |
+| events reduce_s | 0.5375 | 0.984× | 0.5515 | 1.026× |
+| events_reserve reserve_write_s | 62.18 | 1.008× | 63.11 | 1.015× |
+| movement_fair spawn_s | 17.34 | **3.296×** | 17.28 | 0.997× |
+| movement_fair raw_chunked_s | 2897.3 | **1.067×** | 2745.7 | 0.948× |
+| movement_fair raw_ns_entity | 0.00009 | **1.065×** | 0.00009 | 0.946× |
+| movement_fair ecs_s | 2889.5 | 1.039× | 2741.9 | 0.949× |
+| movement_fair ecs_ns_entity | 0.00009 | 1.043× | 0.00009 | 0.946× |
+| movement spawn_s | 4.118 | **3.434×** | 4.396 | **1.068×** |
+| movement raw_s | 875.5 | 0.999× | 880.0 | 1.005× |
+| movement raw_ns_entity | 0.00011 | 1.000× | 0.00011 | 1.009× |
+| movement ecs_s | 709.6 | 0.972× | 730.2 | 1.029× |
+| movement ecs_ns_entity | 0.00009 | 0.978× | 0.00009 | 1.033× |
+| query compile_us | 0.03332 | 0.988× | 0.03320 | 0.996× |
+| query cached_100k_s | 4.412 | 1.000× | 4.153 | 0.941× |
+| query cached_ns | 0.00004 | 1.000× | 0.00004 | 0.955× |
+| query sql_count_s | 300.8 | **2.144×** | 307.2 | 1.021× |
+| relation_hot hot_s | 27.80 | **2.410×** | 55.92 | **2.011×** |
+| relation_hot cold_s | 220.0 | **1.643×** | 245.8 | **1.117×** |
+| relation add_s | 153.7 | **4.025×** | 153.0 | 0.995× |
+| relation lookup_s | 36.12 | **3.565×** | 35.18 | 0.974× |
+| relation_sql_direct seconds | 11.16 | **1.524×** | 13.46 | **1.207×** |
+| relation_sql_direct us_query | 0.1116 | **1.524×** | 0.1346 | **1.207×** |
+| relation_sql direct_s | 4.345 | **1.546×** | 5.336 | **1.228×** |
+| relation_sql join_s | 9.777 | **1.551×** | 11.03 | **1.128×** |
+| scheduler registration_s | 7.531 | **1.176×** | 7.454 | 0.990× |
+| scheduler schedule_s | 1.110 | **1.465×** | 1.104 | 0.995× |
+| spawn plain_s | 16.45 | **3.331×** | 16.58 | 1.008× |
+| spawn default_s | 16.03 | **3.541×** | 16.18 | 1.009× |
+| spawn destroy_s | 63.06 | **2.647×** | 83.25 | **1.320×** |
+| spawn reuse_s | 5.610 | **4.559×** | 5.449 | 0.971× |
+| structural spawn_s | 3.228 | **3.237×** | 3.189 | 0.988× |
+| structural add_tag_s | 39.96 | **2.984×** | 55.45 | **1.388×** |
+| structural remove_tag_s | 38.98 | **2.864×** | 51.57 | **1.323×** |
+| structural add_data_s | 49.16 | **2.870×** | 71.53 | **1.455×** |
+| structural remove_data_s | 40.43 | **2.950×** | 52.27 | **1.293×** |
+| structural random_getset_s | 300.4 | **2.112×** | 300.0 | 0.999× |
+| structural pairs_s | 2663166156.7 | 0.473× | 2666745237.9 | 1.001× |
+| system direct_ns_entity | 0.00003 | 1.000× | 0.00003 | 1.000× |
+| system system_ns_entity | 0.00003 | 1.000× | 0.00003 | 1.000× |
+
+What carries the directive: every module, as before this pass.
+
+The bench here is the package's eighteen bench files, each run fresh, its timings read as rows
+(`target/ab/ecs-bench.jsl` in the jess checkout that measured it). Marking only the functions the
+rows' profiles named (in `world`: the chunk copies, spawning and destroying, `get` and `set`,
+migration, relating, the systems and schedule, the SQL providers; `event` and `relation` whole)
+saved 0.013 s a load and left the structural changes and relation queries 1.3x to 2.0x slower than
+all marked: adding a component with data to 50,000 entities went from 49 ms to 72 ms, a hot
+relation query from 28 ms to 56 ms. A world does that every frame and loads once, and what was
+left unmarked (`command`, `init`, `query`, `relation_query`) is 13 KB, so the package stays marked
+whole. The table's final column is that function-marked session, kept as the record of what was
+tried; the package ships as all marked.
