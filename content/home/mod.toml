@@ -1,0 +1,21 @@
+# dream-ecs as a DreamWeave project: a Jess package. `jess` names the Package Source it
+# publishes, the jess.toml at the repository root, and each release tag `ecs-<version>` is one
+# version of the package, packed by the Mod Template from that tag; every push packs a
+# development build.
+id = "81f77b59-4fc4-436d-a6e7-77157076405c"
+slug = "ecs"
+type = "library"
+status = "active"
+
+[[maintainers]]
+name = "DreamWeave"
+url = "https://github.com/DreamWeave-MP"
+
+[package]
+format = "jpk"
+jess = "org.dreamweave.ecs"
+
+[[releases]]
+version = "0.2.1"
+date = 2026-10-21
+summary = "First release published as a DreamWeave project."
