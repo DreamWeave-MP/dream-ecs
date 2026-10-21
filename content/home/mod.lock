@@ -1,0 +1,51 @@
+{
+  "schema_version": "3",
+  "document": "lock",
+  "project": "81f77b59-4fc4-436d-a6e7-77157076405c",
+  "note": "Written by CI when a release tag is pushed: what each published release's archive contains. Do not edit.",
+  "releases": [
+    {
+      "version": "0.2.1",
+      "locked_from": "5e8b9dd30f5bb2e62ee3ce7c6ad166823728299e",
+      "artifacts": [
+        {
+          "id": "jpk",
+          "format": "jpk",
+          "filename": "org.dreamweave.ecs-0.2.1.jpk",
+          "media_type": "application/vnd.jess.jpk",
+          "size": 70439,
+          "digests": {
+            "sha256": "3fe4c789a81b4a937bdd0c3535674affb88f8015c3bf87bebcb8df58b6242f11"
+          },
+          "jess": {
+            "package": "org.dreamweave.ecs",
+            "jess_api": "1",
+            "content_digest": "e22287be76bac454aa5ef8c18fc31d1ec2fb07ed93d45671314c927ccbadde8f",
+            "dependencies": {
+              "org.dreamweave.jessql": "0.1.6"
+            }
+          }
+        }
+      ],
+      "runtimes": {},
+      "platforms": [],
+      "provides": [],
+      "relationships": [],
+      "components": [
+        {
+          "id": "main",
+          "name": "dream-ecs",
+          "path": ".",
+          "required": true,
+          "default": true,
+          "requires": [],
+          "conflicts": [],
+          "suggested_with": []
+        }
+      ],
+      "groups": [],
+      "extensions": {},
+      "critical_extensions": []
+    }
+  ]
+}
